@@ -615,27 +615,37 @@ function pathToSteps(pathStopIds, edgeAtStop, graph) {
   meaningfulEdges.forEach((e) => {
     const last = merged[merged.length - 1];
     if (last && last._lineId === e.lineId) {
+      if (last.stopIds[last.stopIds.length - 1] !== e.from) last.stopIds.push(e.from);
+      last.stopIds.push(e.to);
       last.toStopId = e.to;
     } else {
-      merged.push({ _lineId: e.lineId, mode: e.mode, fromStopId: e.from, toStopId: e.to });
+      merged.push({ _lineId: e.lineId, mode: e.mode, fromStopId: e.from, toStopId: e.to, stopIds: [e.from, e.to] });
     }
   });
 
   return merged.map((s) => {
-    const fromName = graph.stopsById.get(s.fromStopId).name;
-    const toName = graph.stopsById.get(s.toStopId).name;
+    const fromStop = graph.stopsById.get(s.fromStopId);
+    const toStop = graph.stopsById.get(s.toStopId);
+    const fromCoords = { lat: fromStop.lat, lng: fromStop.lng };
+    const toCoords = { lat: toStop.lat, lng: toStop.lng };
     if (s._lineId) {
       const line = graph.linesByLocalId.get(s._lineId);
       return {
         mode: line ? line.mode : s.mode,
         line: line ? formatLineLabel(line.hatNo, line.name) : "Hat",
-        from: fromName,
-        to: toName,
+        from: fromStop.name,
+        to: toStop.name,
         verified: line ? line.verified !== false : true,
         lineId: s._lineId,
+        stopIds: s.stopIds,
+        fromCoords,
+        toCoords,
       };
     }
-    return { mode: "hub", line: "Yürüyüş", from: fromName, to: toName, verified: true, lineId: null };
+    return {
+      mode: "hub", line: "Yürüyüş", from: fromStop.name, to: toStop.name,
+      verified: true, lineId: null, fromCoords, toCoords,
+    };
   });
 }
 
@@ -647,10 +657,18 @@ function addAccessWalkSteps(steps, route, graph, origin, dest, originLabel, dest
   const lastWalkKm = haversineKm({ lat: lastStop.lat, lng: lastStop.lng }, dest.coords);
 
   if (lastWalkKm > WALK_STEP_MIN_KM) {
-    steps.push({ mode: "hub", line: "Yürüyüş", from: lastStop.name, to: destLabel, verified: true, lineId: null });
+    steps.push({
+      mode: "hub", line: "Yürüyüş", from: lastStop.name, to: destLabel, verified: true, lineId: null,
+      fromCoords: { lat: lastStop.lat, lng: lastStop.lng },
+      toCoords: { lat: dest.coords.lat, lng: dest.coords.lng },
+    });
   }
   if (firstWalkKm > WALK_STEP_MIN_KM) {
-    steps.unshift({ mode: "hub", line: "Yürüyüş", from: originLabel, to: firstStop.name, verified: true, lineId: null });
+    steps.unshift({
+      mode: "hub", line: "Yürüyüş", from: originLabel, to: firstStop.name, verified: true, lineId: null,
+      fromCoords: { lat: origin.coords.lat, lng: origin.coords.lng },
+      toCoords: { lat: firstStop.lat, lng: firstStop.lng },
+    });
   }
   return steps;
 }
@@ -753,7 +771,7 @@ function buildMinTransfersAlternative(origin, dest, originLabel, destLabel, prim
 // ---------------------------------------------------------------------------
 
 const TransitCache = {
-  KEY: "ist_ulasim_cache_v5", // v5: SHEET_API_URL kuruldu, statik data.js artık yalnızca çevrimdışı yedek
+  KEY: "ist_ulasim_cache_v6", // v6: adımlar durak sırasını taşır; cadde geometrisi buna göre çizilir
   _mem: null,
   _load() {
     if (this._mem) return this._mem;
@@ -800,7 +818,13 @@ function getTransitEstimate(originId, origin, destId, dest, fixedSide = "origin"
   if (cached) return cached;
 
   const result = estimateTransit(origin, dest, fixedSide);
-  TransitCache.set(cacheKey, result);
+  // Graf hazır değilken dönen "Hesaplanıyor…" tahmini önbelleğe yazılırsa
+  // cadde çizimi hiç durak sırası göremez. Yalnızca durak koordinatı taşıyan
+  // gerçek rotalar saklanır.
+  const drawable = transitGraph && (result.steps || []).some((s) =>
+    (s.stopIds && s.stopIds.length >= 2) || (s.fromCoords && s.toCoords)
+  );
+  if (drawable) TransitCache.set(cacheKey, result);
   return result;
 }
 
@@ -1977,136 +2001,209 @@ function nearestPointIndex(geometry, point) {
   return best;
 }
 
-/** İki hat geometrisinin birbirine en çok yaklaştığı noktayı bulur (gerçek aktarma noktasının yaklaşık konumu). */
-function nearestPairBetweenGeometries(geomA, geomB) {
-  let best = null;
-  let bestDist = Infinity;
-  geomA.forEach(([latA, lngA]) => {
-    geomB.forEach(([latB, lngB]) => {
-      const d = sqDist(latA, lngA, latB, lngB);
-      if (d < bestDist) {
-        bestDist = d;
-        best = { lat: latA, lng: lngA };
-      }
-    });
+// Seçilen rotanın cadde geometrisi. İETT GTFS'inde shapes.txt yok; bu yüzden
+// her bacak, bindiği durakların sırası OSRM'e verilerek gerçek caddeyi
+// takip eder. Vapur denizde düz gider. OSRM cevap vermezse durak sırasının
+// kendisi çizilir — başlangıçla varış arasında tek bir kuş bakışı kiriş değil.
+const OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1";
+const OSRM_WAYPOINT_CHUNK = 15;
+const routeGeometryCache = new Map();
+let routeDrawToken = 0;
+let routeDrawAbort = null;
+let currentRouteDraw = null;
+
+function dedupeCoords(pts) {
+  const out = [];
+  pts.forEach((p) => {
+    if (!p || typeof p.lat !== "number" || typeof p.lng !== "number") return;
+    const last = out[out.length - 1];
+    if (last && Math.abs(last.lat - p.lat) < 1e-5 && Math.abs(last.lng - p.lng) < 1e-5) return;
+    out.push({ lat: p.lat, lng: p.lng });
   });
-  return best;
+  return out;
 }
 
-function interpolateCoords(a, b, t) {
-  return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+function waypointsForStep(step) {
+  if (step.stopIds && step.stopIds.length >= 2 && transitGraph) {
+    const pts = dedupeCoords(step.stopIds.map((id) => {
+      const s = transitGraph.stopsById.get(id);
+      return s ? { lat: s.lat, lng: s.lng } : null;
+    }));
+    if (pts.length >= 2) return pts;
+  }
+  if (step.fromCoords && step.toCoords) return dedupeCoords([step.fromCoords, step.toCoords]);
+  return null;
 }
 
-// Gerçek hat geometrisinin bir ucu, o bacağın gerçek başlangıç/bitiş noktasından
-// (aktarma durağı ya da projenin/adayın kendi konumu) bu kadar uzaksa, aradaki
-// boşluk ayrı ince kesikli bir "son adım" çizgisiyle tamamlanır — aksi halde ya
-// çizgi havada asılı kalıyor ya da (eski davranışta) hiçbir yolu takip etmeyen
-// dümdüz bir çizgi gerçek rota gibi katı çizilip yanıltıyordu.
-const REAL_GEOMETRY_CONNECT_LIMIT_KM = 0.15;
+function osrmProfileForStep(step) {
+  if (step.mode === "vapur") return null;
+  if (!step.lineId || step.mode === "hub" || step.mode === "yurume") return "foot";
+  return "driving";
+}
+
+function storedGeometryForStep(step) {
+  if (!step.lineId) return null;
+  let geometry = null;
+  const known = linesById[step.lineId];
+  if (known && known.geometry && known.geometry.length > 1) geometry = known.geometry;
+  if (!geometry && transitGraph && transitGraph.linesByLocalId.has(step.lineId)) {
+    const graphLine = transitGraph.linesByLocalId.get(step.lineId);
+    if (graphLine.geometry && graphLine.geometry.length > 1) geometry = graphLine.geometry;
+  }
+  if (!geometry && localTransitGeometry) {
+    const geo = localTransitGeometry[step.lineId];
+    if (geo && geo.length > 1) geometry = geo;
+  }
+  if (!geometry) return null;
+  const wps = waypointsForStep(step);
+  if (!wps) return geometry.map(([lat, lng]) => [lat, lng]);
+  const i1 = nearestPointIndex(geometry, wps[0]);
+  const i2 = nearestPointIndex(geometry, wps[wps.length - 1]);
+  const seg = geometry.slice(Math.min(i1, i2), Math.max(i1, i2) + 1);
+  return seg.length > 1 ? seg.map(([lat, lng]) => [lat, lng]) : null;
+}
+
+function geometryCacheKey(profile, pts) {
+  return profile + "|" + pts.map((p) => p.lat.toFixed(5) + "," + p.lng.toFixed(5)).join(";");
+}
+
+async function fetchOsrmGeometry(profile, pts, signal) {
+  const key = geometryCacheKey(profile, pts);
+  if (routeGeometryCache.has(key)) return routeGeometryCache.get(key);
+  const coordStr = pts.map((p) => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(";");
+  const radiuses = pts.map(() => (profile === "foot" ? "40" : "80")).join(";");
+  const url = `${OSRM_ROUTE_URL}/${profile}/${coordStr}?overview=full&geometries=geojson&steps=false&radiuses=${radiuses}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(String(res.status));
+  const data = await res.json();
+  const coords = data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
+  if (!coords || coords.length < 2) throw new Error(data.code || "empty");
+  const latlngs = coords.map(([lng, lat]) => [lat, lng]);
+  routeGeometryCache.set(key, latlngs);
+  return latlngs;
+}
+
+function chunkWaypoints(pts) {
+  if (pts.length <= OSRM_WAYPOINT_CHUNK) return [pts];
+  const chunks = [];
+  const hop = OSRM_WAYPOINT_CHUNK - 1;
+  for (let i = 0; i < pts.length - 1; i += hop) {
+    const slice = pts.slice(i, i + OSRM_WAYPOINT_CHUNK);
+    if (slice.length >= 2) chunks.push(slice);
+    if (i + OSRM_WAYPOINT_CHUNK >= pts.length) break;
+  }
+  return chunks;
+}
+
+async function geometryAlongWaypoints(profile, pts, signal) {
+  const fallback = pts.map((p) => [p.lat, p.lng]);
+  if (!profile) return { latlngs: fallback, kind: "stops" };
+  const out = [];
+  let kind = "street";
+  for (const chunk of chunkWaypoints(pts)) {
+    try {
+      let part = await fetchOsrmGeometry(profile, chunk, signal);
+      if (out.length && part.length) part = part.slice(1);
+      out.push(...part);
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      kind = "stops";
+      let part = chunk.map((p) => [p.lat, p.lng]);
+      if (out.length && part.length) part = part.slice(1);
+      out.push(...part);
+    }
+  }
+  return { latlngs: out.length >= 2 ? out : fallback, kind };
+}
+
+function drawRouteSegment(latlngs, color, tooltipText, kind) {
+  if (!latlngs || latlngs.length < 2) return;
+  const street = kind === "street";
+  const approx = kind === "approx";
+  const poly = L.polyline(latlngs, {
+    color,
+    weight: street ? 5 : approx ? 3 : 4,
+    opacity: street ? 0.92 : 0.8,
+    dashArray: approx ? "2 8" : null,
+    lineJoin: "round",
+    lineCap: "round",
+  }).addTo(routesLayer);
+  poly.bindTooltip(tooltipText, { sticky: true });
+}
+
+function renderStreetRoute(draw) {
+  if (routeDrawAbort) routeDrawAbort.abort();
+  const abort = new AbortController();
+  routeDrawAbort = abort;
+  const token = ++routeDrawToken;
+  const { originCoords, destCoords, steps, bucket } = draw;
+  routesLayer.clearLayers();
+  if (!steps.length) return;
+
+  const prelim = [];
+  steps.forEach((step) => {
+    const wps = waypointsForStep(step);
+    const latlngs = wps
+      ? wps.map((p) => [p.lat, p.lng])
+      : [[originCoords.lat, originCoords.lng], [destCoords.lat, destCoords.lng]];
+    prelim.push(...latlngs);
+    drawRouteSegment(
+      latlngs,
+      MODE_LINE_COLOR[step.mode] || bucket.color,
+      `${MODE_ICON[step.mode] || ""} ${escapeHtml(step.line)}`,
+      wps ? "stops" : "approx"
+    );
+  });
+  if (prelim.length) {
+    map.fitBounds(L.latLngBounds(prelim), { padding: [70, 70], animate: true, duration: 0.6 });
+  }
+
+  const jobs = steps.map(async (step) => {
+    const color = MODE_LINE_COLOR[step.mode] || bucket.color;
+    const tooltipText = `${MODE_ICON[step.mode] || ""} ${escapeHtml(step.line)}`;
+    const stored = storedGeometryForStep(step);
+    if (stored) return { latlngs: stored, color, tooltipText, kind: "street" };
+    const wps = waypointsForStep(step);
+    if (!wps) {
+      return {
+        latlngs: [[originCoords.lat, originCoords.lng], [destCoords.lat, destCoords.lng]],
+        color, tooltipText, kind: "approx",
+      };
+    }
+    const traced = await geometryAlongWaypoints(osrmProfileForStep(step), wps, abort.signal);
+    return { latlngs: traced.latlngs, color, tooltipText, kind: traced.kind };
+  });
+
+  Promise.all(jobs).then((segments) => {
+    if (token !== routeDrawToken) return;
+    routesLayer.clearLayers();
+    const allPoints = [];
+    segments.forEach((seg) => {
+      drawRouteSegment(seg.latlngs, seg.color, seg.tooltipText, seg.kind);
+      allPoints.push(...seg.latlngs);
+    });
+    if (allPoints.length) {
+      map.fitBounds(L.latLngBounds(allPoints), { padding: [70, 70], animate: true, duration: 0.6 });
+    }
+  }).catch((err) => {
+    if (err && err.name === "AbortError") return;
+  });
+}
 
 /**
- * Rotayı, mümkün olduğunca hatların OSM'den alınan gerçek geometrisini
- * (yol/ray şeklini) takip ederek çizer. Her bacak kendi rengiyle/gerçek
- * güzergahıyla ayrı bir segment olarak çizilir; gerçek geometrisi olmayan
- * (canlı keşfedilmiş ya da TAHMİNİ) hatlar için düz kesikli çizgiye döner.
+ * Seçilen rotayı durak sırası üzerinden caddeleri takip ederek çizer.
+ * Adımlar henüz durak taşımıyorsa (graf kurulmadan önceki kaba tahmin)
+ * yalnızca kesikli bir kiriş gösterilir.
  */
 function drawRoute(originCoords, row, bucket, destCoordsOverride) {
-  routesLayer.clearLayers();
   const destCoords = destCoordsOverride || { lat: row.project.lat, lng: row.project.lng };
-  const steps = row.steps || [];
-  if (steps.length === 0) return;
-
-  const lineOfStep = (s) => (s.lineId ? linesById[s.lineId] : null);
-  // Graf motorunun ürettiği adımlardaki otobüs lineId'leri linesById'de değil
-  // (transit_network.json'ın kendi id'leri, ör. "iett_line_1") — bu yüzden
-  // geometri için ayrıca transitGraph + localTransitGeometry'e de bakılır.
-  const geometryOfStep = (s) => {
-    const line = lineOfStep(s);
-    if (line && line.geometry && line.geometry.length > 1) return line.geometry;
-    if (s.lineId && transitGraph && transitGraph.linesByLocalId.has(s.lineId)) {
-      const graphLine = transitGraph.linesByLocalId.get(s.lineId);
-      if (graphLine.geometry && graphLine.geometry.length > 1) return graphLine.geometry;
-      if (localTransitGeometry) {
-        const geo = localTransitGeometry[s.lineId];
-        if (geo && geo.length > 1) return geo;
-      }
-    }
-    return null;
+  currentRouteDraw = {
+    originCoords,
+    destCoords,
+    steps: row.steps || [],
+    bucket,
   };
-
-  // Her bacağın başlangıç/bitiş "çapa" koordinatını belirle: ardışık iki
-  // hattın geometrisi varsa, gerçek aktarma noktası bu iki hattın birbirine
-  // en yakın olduğu nokta olarak hesaplanır.
-  const anchors = [originCoords];
-  for (let i = 0; i < steps.length - 1; i++) {
-    const gA = geometryOfStep(steps[i]);
-    const gB = geometryOfStep(steps[i + 1]);
-    if (gA && gB) {
-      anchors.push(nearestPairBetweenGeometries(gA, gB));
-    } else {
-      anchors.push(interpolateCoords(originCoords, destCoords, (i + 1) / steps.length));
-    }
-  }
-  anchors.push(destCoords);
-
-  const allPoints = [];
-  steps.forEach((step, i) => {
-    const startA = anchors[i];
-    const endA = anchors[i + 1];
-    const geometry = geometryOfStep(step);
-    const modeColor = MODE_LINE_COLOR[step.mode] || bucket.color;
-    const tooltipText = `${MODE_ICON[step.mode] || ""} ${escapeHtml(step.line)}`;
-
-    const drawSegment = (latlngs, dashed) => {
-      const poly = L.polyline(latlngs, {
-        color: modeColor,
-        weight: dashed ? 3 : 5,
-        opacity: dashed ? 0.6 : 0.9,
-        dashArray: dashed ? "2 8" : null,
-        lineJoin: "round",
-        lineCap: "round",
-      }).addTo(routesLayer);
-      poly.bindTooltip(tooltipText, { sticky: true });
-      allPoints.push(...latlngs);
-    };
-
-    if (geometry) {
-      const i1 = nearestPointIndex(geometry, startA);
-      const i2 = nearestPointIndex(geometry, endA);
-      const lo = Math.min(i1, i2);
-      const hi = Math.max(i1, i2);
-      const seg = geometry.slice(lo, hi + 1).map(([lat, lng]) => [lat, lng]);
-
-      if (seg.length > 1) {
-        const segStart = { lat: seg[0][0], lng: seg[0][1] };
-        const segEnd = { lat: seg[seg.length - 1][0], lng: seg[seg.length - 1][1] };
-        const startIsNearSegStart = haversineKm(startA, segStart) <= haversineKm(startA, segEnd);
-        const nearStart = startIsNearSegStart ? segStart : segEnd;
-        const nearEnd = startIsNearSegStart ? segEnd : segStart;
-
-        // Gerçek güzergah her zaman katı çizgiyle çizilir.
-        drawSegment(seg, false);
-        // Gerçek hat, bacağın asıl uçlarına (durak/proje konumu) tam ulaşmıyorsa
-        // aradaki fark ince kesikli bir "son adım" çizgisiyle tamamlanır.
-        if (haversineKm(startA, nearStart) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
-          drawSegment([[startA.lat, startA.lng], [nearStart.lat, nearStart.lng]], true);
-        }
-        if (haversineKm(endA, nearEnd) > REAL_GEOMETRY_CONNECT_LIMIT_KM) {
-          drawSegment([[nearEnd.lat, nearEnd.lng], [endA.lat, endA.lng]], true);
-        }
-      } else {
-        // Gerçek geometri bu bacak için kullanılamadı (uçlar hattın tamamen
-        // aynı noktasına denk düştü) — dürüstçe kesikli/tahmini göster.
-        drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], true);
-      }
-    } else {
-      drawSegment([[startA.lat, startA.lng], [endA.lat, endA.lng]], true);
-    }
-  });
-
-  if (allPoints.length) {
-    map.fitBounds(L.latLngBounds(allPoints), { padding: [70, 70], animate: true, duration: 0.8 });
-  }
+  renderStreetRoute(currentRouteDraw);
 }
 
 // showRouteResult'a en son verilen estimate — "En Hızlı"/"En Az Aktarmalı"
@@ -2125,10 +2222,17 @@ function renderRouteVariant(estimate, useMinTransfers) {
 }
 
 routeVariantFastestBtn.addEventListener("click", () => {
-  if (currentRouteEstimate) renderRouteVariant(currentRouteEstimate, false);
+  if (!currentRouteEstimate || !currentRouteDraw) return;
+  renderRouteVariant(currentRouteEstimate, false);
+  currentRouteDraw.steps = currentRouteEstimate.steps || [];
+  renderStreetRoute(currentRouteDraw);
 });
 routeVariantFewestBtn.addEventListener("click", () => {
-  if (currentRouteEstimate) renderRouteVariant(currentRouteEstimate, true);
+  const alt = currentRouteEstimate && currentRouteEstimate.minTransfersAlternative;
+  if (!alt || !currentRouteDraw) return;
+  renderRouteVariant(currentRouteEstimate, true);
+  currentRouteDraw.steps = alt.steps || [];
+  renderStreetRoute(currentRouteDraw);
 });
 
 function showRouteResult(estimate) {

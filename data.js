@@ -33,7 +33,8 @@
  * seçildi — 2128 hat+yön kombinasyonundan 642'sinin GTFS'te hiç aktif seferi
  * yoktu (muhtemelen iptal/mevsimlik), bu yüzden 1486 hatla sonuçlandı.
  * transit_network_geometry.json boş kaldı — bu GTFS feed'i shapes.txt (gerçek
- * güzergah şekli) içermiyor; haritada rotalar düz/kesikli çizgiyle çizilir.
+ * güzergah şekli) içermiyor. Haritada seçilen rota, durak sırası üzerinden
+ * cadde ağına (OSRM) oturtulur; kuş bakışı düz kiriş çizilmez.
  *
  * Şema, Ankara'daki (ANKARA_DATA) ile birebir aynıdır — bkz. o dosyanın
  * başındaki şema açıklaması.
