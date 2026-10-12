@@ -2335,6 +2335,13 @@ inactiveModalSave.addEventListener("click", async () => {
 // türetilmiş setleri/harita pinlerini/dropdown'ı yeniden kurar ve artık
 // güncelliğini yitirmiş olabilecek rota tahminlerini (TransitCache) temizler.
 function applyLiveProjects(projects) {
+  projects.forEach((p) => {
+    if (!p.ageRange && p.ageMin != null && p.ageMin !== "" && p.ageMax != null && p.ageMax !== "") {
+      const min = Number(p.ageMin);
+      const max = Number(p.ageMax);
+      if (!Number.isNaN(min) && !Number.isNaN(max)) p.ageRange = { min, max };
+    }
+  });
   ISTANBUL_DATA.projects.length = 0;
   projects.forEach((p) => ISTANBUL_DATA.projects.push(p));
   stopApproxCoordsCache = null;

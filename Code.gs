@@ -1,29 +1,29 @@
 /**
- * İstanbul Ulaşım & Proje Eşleştirme Modülü — paylaşımlı proje veritabanı + aday yorumları + AI.
- * Ankara'daki (ikmaps) Code.gs'in İSTANBUL İÇİN AYRI bir kopyası — kendi
- * Google Sheet'ine yazar, Ankara'nınkine dokunmaz.
+ * Tepe Güvenlik 4. Direktörlük — paylaşımlı proje veritabanı + aday yorumları + AI.
+ * Ankara ve İstanbul Anadolu sayfalarından AYRI bir Google Sheet'e yazar.
  *
- * Kurulum: bu dosyayı, İstanbul için oluşturulan (Ankara'dan bağımsız) yeni
- * bir Google Sheet'te Uzantılar > Apps Script menüsünden açılan editöre
- * YAPIŞTIR, "seedIfEmpty" fonksiyonunu bir kez çalıştır (16 projeyi yazar),
- * sonra Dağıt > Yeni Dağıtım > Web Uygulaması (Execute as: Me, Who has
- * access: Anyone) ile yayınla. Çıkan /exec URL'ini ikmaps-istanbul/app.js'teki
- * SHEET_API_URL'e yapıştır (aday yorumları ve AI de aynı URL'i kullanır).
- * AI özellikleri için ayrıca Script Özellikleri'ne GEMINI_API_KEY ekle
- * (bkz. callGemini_). Sonraki kod güncellemelerinde "Dağıtımları yönet" ile
- * mevcut dağıtımın YENİ SÜRÜMÜNÜ yayınla (URL değişmez).
+ * Kurulum:
+ * 1. Yeni bir Google Sheet aç (ör. "Tepe Güvenlik 4. Direktörlük").
+ * 2. Uzantılar > Apps Script, bu dosyanın tamamını yapıştır, kaydet.
+ * 3. Dağıt > Yeni dağıtım > Web uygulaması.
+ *    Yürütme: Ben, Erişim: Herkes. Dağıt.
+ * 4. Çıkan /exec adresini app.js içindeki SHEET_API_URL'e yapıştır.
+ * İlk sayfa açılışı boş "Projeler" sekmesine 10 güvenlik projesini yazar
+ * (urgent=false, active=true). Sonraki aç/kapa ve acil kayıtları aynı satırlara
+ * yazılır. AI için Script Özellikleri'ne GEMINI_API_KEY eklenebilir.
+ * Kod güncellemesinde Dağıtımları yönet > mevcut dağıtımın yeni sürümünü yayınla
+ * (adres değişmez).
  */
 
 const SHEET_NAME = "Projeler";
 const FIELDS = [
   "id", "name", "sector", "address", "lat", "lng", "accessStopId",
   "shift", "salary", "meal", "transport", "referral", "gender",
-  "urgent", "active", "capacity", "position",
+  "urgent", "active", "capacity", "position", "ageMin", "ageMax",
 ];
 
 /**
- * "capacity" (kontenjan) ve "position" (Pozisyon Filtresi — Şeflik/Temizlik
- * Görevlisi/Servis) sonradan eklenen alanlar — canlı Sheet'in başlık
+ * "capacity", "position", "ageMin" ve "ageMax" sonradan eklenen alanlar — canlı Sheet'in başlık
  * satırında henüz yoksa (ör. bu kod ilk kez deploy edildiğinde) burada
  * otomatik olarak sütun başlıkları eklenir. Böylece kullanıcı Sheet'i elle
  * düzenlemek zorunda kalmaz. Mevcut satırlardaki hücreler boş kalır — bu
@@ -34,7 +34,7 @@ function ensureLaterAddedColumns_() {
   const sheet = getSheet_();
   let lastCol = sheet.getLastColumn();
   const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
-  ["capacity", "position"].forEach((col) => {
+  ["capacity", "position", "ageMin", "ageMax"].forEach((col) => {
     if (!header.includes(col)) {
       lastCol += 1;
       sheet.getRange(1, lastCol).setValue(col);
@@ -100,8 +100,8 @@ function readAllRows_() {
           v = v === true || v === "TRUE" || v === "true";
         } else if (key === "lat" || key === "lng") {
           v = Number(v);
-        } else if (key === "capacity") {
-          // Boş hücre = sınırsız kontenjan (null); dolu hücre sayıya çevrilir.
+        } else if (key === "capacity" || key === "ageMin" || key === "ageMax") {
+          // Boş hücre = tanımsız (kontenjan için sınırsız); dolu hücre sayıya çevrilir.
           v = v === "" || v == null ? null : Number(v);
         } else {
           v = v == null ? "" : String(v);
@@ -122,46 +122,42 @@ function findRowIndexById_(id) {
 }
 
 /**
- * Tek seferlik kurulum yardımcısı: "Projeler" sekmesi tamamen boşsa (henüz
- * hiç satır eklenmemişse) data.js'teki 16 gerçek projeyi Sheet'e yazar.
- * Apps Script editöründe Çalıştır menüsünden manuel tetiklenir. Sheet'te
- * zaten veri varsa hiçbir şey yapmadan çıkar — güvenle tekrar çalıştırılabilir.
+ * "Projeler" sekmesi boşsa Tepe Güvenlik 4. Direktörlük'teki 10 projeyi yazar.
+ * Hepsi açık (active=true) ve acil değil (urgent=false) başlar. Sekmede veri
+ * varsa hiçbir satıra dokunmaz — aç/kapa ve acil işaretleri korunur.
+ * doGet ilk okumada bunu kendisi çağırır; editörden de çalıştırılabilir.
  */
 function seedIfEmpty() {
   const sheet = getSheet_();
-  if (sheet.getLastRow() > 1) return; // zaten veri var, dokunma
+  if (sheet.getLastRow() > 1) return;
   const rows = [
-    ["proj_bezmialem_hastanesi_vatan_tem_hiz", "Bezmialem Hastanesi Vatan Tem. Hiz.", "Temizlik", "Topkapı, Fatih", 41.018829, 28.935077, "stop_capa_sehremini", "07.30-17.30", "28.000₺", "Yemekhane", "Servis", "Projeye yönlendirilecek — Operasyon: Kemal Çalış / İK: Mustafa Kerem As", "Kadın/Erkek", false, true],
-    ["proj_calik_holding_temizlik_hizmeti", "Çalık Holding Temizlik Hizmeti", "Temizlik", "Esentepe, Zincirlikuyu", 41.071161, 29.015096, "stop_gayrettepe", "08.00-17.30", "29.000₺", "550₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Feridun Aksu / İK: Haşim Berkay Aslıhak", "Erkek", false, true],
-    ["proj_havas_istanbul_havalimani_tem_hiz", "Havaş İstanbul Havalimanı Tem. Hiz.", "Temizlik", "Tayakadın, Arnavutköy", 41.276148, 28.728735, "stop_istanbul_havalimani", "08.00-17.00/16.00-24.00", "34.000₺", "Yemekhane", "Servis", "Telefon görüşmesi — Operasyon: Feridun Aksu / İK: Ahmet Berat İmamoğlu", "Erkek", false, true],
-    ["proj_haribo_temizlik_hizmeti", "Haribo Temizlik Hizmeti", "Temizlik", "Ömerli, Arnavutköy", 41.124429, 28.633433, "stop_tasoluk", "08:00-17:00 / 16:00-24:00", "34.000₺", "Yemekhane", "Servis", "Telefon görüşmesi — Operasyon: Rıdvan Altuntaş / İK: Ali Remzi Adar", "Erkek", false, true],
-    ["proj_kuzey_marmara_santiye_tem_hiz", "Kuzey Marmara Şantiye Tem. Hiz.", "Temizlik", "Sazlıdere, Başakşehir", 41.105915, 28.718574, "stop_kayasehir", "08:00-17:00", "30.000₺", "Yemekhane", "Servis", "Telefon görüşmesi — Operasyon: Kemal Çalış / İK: Ahmet Berat İmamoğlu", "Erkek", false, true],
-    ["proj_kadir_has_uni_cibali_ana_kampus_tem_hiz", "Kadir Has Üni. Cibali Ana Kampüs Tem. Hiz.", "Temizlik", "Cibali, Fatih", 41.024951, 28.958974, "stop_cibali", "07:00-16:00 / 07:00-17:00", "30.000₺", "330₺", "Multinet", "Projeye yönlendirilecek — Operasyon: Kemal Çalış / İK: Haşim Berkay Aslıhak", "Erkek", false, true],
-    ["proj_enka_okullari_istinye_temizlik_hiz", "Enka Okulları İstinye Temizlik Hiz.", "Temizlik", "İstinye, Sarıyer", 41.113932, 29.035994, "stop_ataturk_oto_sanayi", "07:30-16:00 / 10:30-19:00", "34.000₺", "Yemekhane", "3.628₺", "Projeye yönlendirilecek — Operasyon: Kemal Çalış / İK: Ece Uğurlu", "Kadın/Erkek", false, true],
-    ["proj_adidas_capacity", "Adidas Capacity", "Temizlik", "Ataköy, Bakırköy", 40.977701, 28.871391, "stop_bakirkoy", "09:45-11:45", "14.170₺", "-", "-", "Telefon görüşmesi — Operasyon: Feridun Aksu / İK: Aybars Zeki", "Kadın", false, true],
-    ["proj_adidas_cevahir", "Adidas Cevahir", "Temizlik", "Büyükdere, Şişli", 41.062036, 28.992982, "stop_sisli", "09:45-11:45", "14.170₺", "-", "-", "Telefon görüşmesi — Operasyon: Feridun Aksu / İK: Aybars Zeki", "Kadın", false, true],
-    ["proj_gap_tarlabasi", "Gap Tarlabaşı", "Temizlik", "Tarlabaşı, Beyoğlu", 41.03668, 28.980336, "stop_huseyin_aga_camii", "07.00-17.00", "29.400₺", "550₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Feridun Aksu / İK: Haşim Berkay Aslıhak", "Erkek", false, true],
-    ["proj_halic_universitesi_temizlik_hizmeti", "Haliç Üniversitesi Temizlik Hizmeti", "Temizlik", "5.Levent, Alibeyköy", 41.085852, 28.952187, "stop_alibeykoy", "08.30-17.30", "32.500₺", "Yemekhane", "3.628₺", "Projeye yönlendirilecek — Operasyon: Kemal Çalış / İK: Ece Uğurlu", "Erkek", false, true],
-    ["proj_halic_universitesi_temizlik_hizmeti_2", "Haliç Üniversitesi Temizlik Hizmeti", "Temizlik", "5.Levent, Alibeyköy", 41.085852, 28.952187, "stop_alibeykoy", "08.00-17.00", "32.500₺", "Yemekhane", "3.628₺", "Projeye yönlendirilecek — Operasyon: Kemal Çalış / İK: Ece Uğurlu", "Kadın", false, true],
-    ["proj_pamir_gida", "Pamir Gıda (Haribo) Temizlik Hizm.", "Temizlik", "Ömerli, Arnavutköy", 41.124429, 28.633433, "stop_tasoluk", "07:00-15:00 / 15:00-23:00 / 23:00-07:00", "42.500₺", "Yemekhane", "Servis", "Projeye yönlendirilecek — Operasyon: Rıdvan Altuntaş / İK: Ahmet Berat İmamoğlu", "Erkek", false, true],
-    ["proj_bilgili_holding", "Bilgili Holding / Akaretler Beşiktaş", "Temizlik", "Akaretler, Beşiktaş", 41.043146, 29.002455, "stop_besiktas_iskele", "07.00-15.00 / 13.00-21.00", "34.900₺", "8.690₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Feridun Aksu / İK: Ece Uğurlu", "Erkek", false, true],
-    ["proj_aras_kargo_ikitelli", "Aras Kargo İkitelli", "Temizlik", "İkitelli, Başakşehir", 41.095215, 28.80037, "stop_siteler", "08.00-17.30", "35.000₺", "8.300₺", "3.628₺", "Telefon görüşmesi — Operasyon: Rıdvan Altuntaş / İK: Ali Remzi Adar", "Erkek", false, true],
-    ["proj_metro_properties_beylikduzu_avm_tem_hiz", "Metro Properties - Beylikdüzü AVM Tem. Hiz.", "Temizlik", "Çelebi Mehmet Cd. (E5 Yan Yol), Esenyurt", 41.009287, 28.660097, "stop_halkali", "08:00-15:00 / 15:00-22:00", "28.000₺", "10.000₺", "3.567₺ Multinet", "Telefon görüşmesi — Operasyon: Rıdvan Altuntaş / İK: Ali Remzi Adar", "Erkek", false, true],
+    ["proj_kentplus_3352", "Kentplus 3352 Ada Sitesi", "Güvenlik", "Barbaros Mahallesi, Ataşehir", 40.997671, 29.104585, "stop_yenisahra", "12 saat · 2 gündüz 2 gece 2 izin", "47.000₺ · net 51.000₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Ferdi Hakan / İK: Feray Çorlu — Elit site; özel güvenlik kimlik kartı zorunlu", "Erkek", false, true, "", "Özel Güvenlik", 22, 43],
+    ["proj_pendorya_avm", "Pendorya AVM", "Güvenlik", "Çamçeşme, Pendik", 40.866101, 29.275137, "stop_tersane", "12 saat · 2 gündüz 2 gece 2 izin", "44.500₺ · net 47.500₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Selim Öztürk / İK: Feray Çorlu — Mesai imkânı mevcut", "Erkek", false, true, "", "Özel Güvenlik", 22, 44],
+    ["proj_tepe_nautilus", "Tepe Nautilus AVM", "Güvenlik", "Acıbadem, Fatih Sk. No:1, Kadıköy", 40.999617, 29.031495, "stop_ayrilik_cesmesi", "07:00-15:00 / 15:00-23:00 / 23:00-07:00 · 6 çalış 1 izin", "41.000₺ · net 44.628₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın — Vergi kesintisi yok", "Kadın/Erkek", false, true, "", "Özel Güvenlik", 22, 45],
+    ["proj_anadolu_grubu", "Anadolu Grubu", "Güvenlik", "Buyaka, Balkan Cd. No:58, Ümraniye", 41.026465, 29.127646, "stop_ihlamurkuyu", "8 saat · 6 çalış 1 izin", "54.000₺ · net 62.618₺", "4.990₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Nazım Güler / İK: Feray Çorlu", "Erkek", false, true, "", "Özel Güvenlik", 22, 32],
+    ["proj_acarer_metal", "Acarer Metal (BOSB)", "Güvenlik", "Aydınlı, 1 Nolu Cd. No:14, BOSB, Tuzla", 40.877745, 29.397198, "stop_sabiha_gokcen_havalimani", "12 saat · 3 çalış 2 off", "41.750₺ · net 47.550₺", "Projede", "5.250₺", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın — Metal fabrikası", "Erkek", false, true, "", "Özel Güvenlik", 22, 46],
+    ["proj_sukru_saracoglu", "Şükrü Saracoğlu", "Güvenlik", "Zühtüpaşa, Recep Peker Cd. No:3, Kadıköy", 40.987581, 29.036977, "stop_sogutlucesme", "12 saat · 2 gündüz 2 gece 2 izin", "39.600₺ · net 53.628₺", "3.628₺", "10.400₺", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın — Stadyum projesi", "Erkek", false, true, "", "Özel Güvenlik", 22, 44],
+    ["proj_kuhne_nagel", "Kühne Nagel Depo", "Güvenlik", "Orta, Öztaş Sk. No:12, Logipark, Tuzla", 40.891272, 29.396216, "stop_sabiha_gokcen_havalimani", "12 saat · 4 çalış 3 off", "42.300₺", "Projede", "Servis", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın", "Erkek", false, true, "", "Özel Güvenlik", 22, 47],
+    ["proj_sutas", "Sütaş", "Güvenlik", "Dudullu OSB, Ümraniye", 40.996189, 29.177048, "stop_modoko", "12 saat · 2 gündüz 2 gece 2 izin", "32.720₺ · net 43.632₺", "Projede", "Servis", "Operasyon görüşmesi, ardından projeye yönlendirilecek — Operasyon: Murat Doğan / İK: S. Nur Güleç — Tecilli ve emekli alımı yok", "Erkek", false, true, "", "Özel Güvenlik", 22, 40],
+    ["proj_medipol_kavacik", "Medipol Üniversitesi Kampüsü", "Güvenlik", "Kavacık, Beykoz", 41.091038, 29.091431, "stop_carsi_2", "12 saat · 2 gündüz 2 gece 2 izin", "41.563₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Murat Doğan / İK: S. Nur Güleç — Tecilli alımı yok; emekli alımı var", "Erkek", false, true, "", "Özel Güvenlik", 22, 45],
+    ["proj_bomontiada", "Bomontiada", "Güvenlik", "Bomonti, Şişli", 41.058118, 28.980848, "stop_osmanbey", "07:00-15:00 / 15:00-23:00 / 23:00-07:00 · 6 çalış 1 izin", "38.432₺ · net 41.730₺", "7.800₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Ersan Artan / İK: S. Nur Güleç — X-ray bilgisi gerekli", "Kadın", false, true, "", "Özel Güvenlik", 22, 39],
   ];
-  // Seed satırları eski (kontenjan/pozisyon öncesi) sütun düzeninde; sondaki iki
-  // sütunu (capacity, position) burada ekliyoruz. Pozisyonlar kaynak Excel'in
-  // unvan sütunundan (TEMİZLİK ELEMANI/PERSONELİ -> Temizlik Görevlisi, BAHÇIVAN).
-  const POSITION_BY_ID = { proj_halic_universitesi_temizlik_hizmeti: "Bahçıvan" };
-  const full = rows.map((r) => r.concat(["", POSITION_BY_ID[r[0]] || "Temizlik Görevlisi"]));
-  sheet.getRange(2, 1, full.length, FIELDS.length).setValues(full);
+  sheet.getRange(2, 1, rows.length, FIELDS.length).setValues(rows);
 }
 
 function doGet(e) {
-  ensureLaterAddedColumns_();
-  const projects = readAllRows_();
-  const comments = readAllComments_();
-  return ContentService.createTextOutput(JSON.stringify({ ok: true, projects, comments }))
-    .setMimeType(ContentService.MimeType.JSON);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ensureLaterAddedColumns_();
+    seedIfEmpty();
+    const projects = readAllRows_();
+    const comments = readAllComments_();
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, projects, comments }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function doPost(e) {
