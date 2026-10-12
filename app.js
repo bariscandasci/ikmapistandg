@@ -1848,7 +1848,7 @@ function renderOriginToProject(originId) {
   // (en üstteki) rotayı sıkı şekilde kadrajlayacak. Bu çağrı SONRADAN
   // yapılırsa drawRoute'un fitBounds'unu geçersiz kılıp rota çizgisini geniş
   // görünümde fark edilmez kadar küçük bırakır.
-  map.setView([origin.coords.lat, origin.coords.lng], 11, { animate: true, duration: 0.8 });
+  map.setView([origin.coords.lat, origin.coords.lng], 11, { animate: false });
 
   enrichOriginInBackground(origin);
   renderNearbyLinesPanel(originId);
@@ -1899,7 +1899,7 @@ function renderProjectToOrigin(projectId) {
   const project = projectById(projectId);
   resultsHeading.textContent = `${project.name} → En Uygun İlçeler (${rows.length})`;
   // bkz. renderOriginToProject'teki not — drawRoute'un fitBounds'undan ÖNCE gelmeli.
-  map.setView([project.coords.lat, project.coords.lng], 11, { animate: true, duration: 0.8 });
+  map.setView([project.coords.lat, project.coords.lng], 11, { animate: false });
 
   enrichOriginInBackground(project);
   renderNearbyLinesPanel(projectId);
@@ -2005,7 +2005,13 @@ function nearestPointIndex(geometry, point) {
 // her bacak, bindiği durakların sırası OSRM'e verilerek gerçek caddeyi
 // takip eder. Vapur denizde düz gider. OSRM cevap vermezse durak sırasının
 // kendisi çizilir — başlangıçla varış arasında tek bir kuş bakışı kiriş değil.
-const OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1";
+// project-osrm.org yaya profili bu bölgede arabayla aynı grafı kullanıyor ve
+// metro durağı gibi iki nokta arasında otoyol döngüsüne sapıyor. Yaya ve raylı
+// hatlar kaldırım grafından, otobüs araba grafından çizilir (OSM yönlendirme).
+const OSRM_PROFILE_URL = {
+  foot: "https://routing.openstreetmap.de/routed-foot/route/v1/foot",
+  driving: "https://routing.openstreetmap.de/routed-car/route/v1/driving",
+};
 const OSRM_WAYPOINT_CHUNK = 15;
 const routeGeometryCache = new Map();
 let routeDrawToken = 0;
@@ -2037,8 +2043,19 @@ function waypointsForStep(step) {
 
 function osrmProfileForStep(step) {
   if (step.mode === "vapur") return null;
-  if (!step.lineId || step.mode === "hub" || step.mode === "yurume") return "foot";
-  return "driving";
+  if (step.mode === "otobus" || step.mode === "metrobus") return "driving";
+  return "foot";
+}
+
+function polylineKm(latlngs) {
+  let km = 0;
+  for (let i = 1; i < latlngs.length; i++) {
+    km += haversineKm(
+      { lat: latlngs[i - 1][0], lng: latlngs[i - 1][1] },
+      { lat: latlngs[i][0], lng: latlngs[i][1] }
+    );
+  }
+  return km;
 }
 
 function storedGeometryForStep(step) {
@@ -2071,14 +2088,32 @@ async function fetchOsrmGeometry(profile, pts, signal) {
   const key = geometryCacheKey(profile, pts);
   if (routeGeometryCache.has(key)) return routeGeometryCache.get(key);
   const coordStr = pts.map((p) => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(";");
-  const radiuses = pts.map(() => (profile === "foot" ? "40" : "80")).join(";");
-  const url = `${OSRM_ROUTE_URL}/${profile}/${coordStr}?overview=full&geometries=geojson&steps=false&radiuses=${radiuses}`;
+  const radiuses = pts.map(() => (profile === "foot" ? "180" : "100")).join(";");
+  const url = `${OSRM_PROFILE_URL[profile]}/${coordStr}?overview=full&geometries=geojson&steps=false&radiuses=${radiuses}`;
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(String(res.status));
   const data = await res.json();
   const coords = data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
   if (!coords || coords.length < 2) throw new Error(data.code || "empty");
   const latlngs = coords.map(([lng, lat]) => [lat, lng]);
+  // Duraklar arasındaki düz mesafeden kat kat uzun bir sapma (otoyol döngüsü,
+  // boğazı köprüden yürüme) bu bacağın yolu değildir; durak sırasına düşülür.
+  let chainKm = 0;
+  for (let i = 1; i < pts.length; i++) chainKm += haversineKm(pts[i - 1], pts[i]);
+  const alongKm = polylineKm(latlngs);
+  if (chainKm > 0.15 && alongKm > chainKm * 1.9 && alongKm > chainKm + 0.45) {
+    throw new Error("detour");
+  }
+  // Durak sitenin içindeyse çizgi yola oturur; son birkaç on metreyi pine bağla.
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  if (haversineKm({ lat: latlngs[0][0], lng: latlngs[0][1] }, first) > 0.04) {
+    latlngs.unshift([first.lat, first.lng]);
+  }
+  const end = latlngs[latlngs.length - 1];
+  if (haversineKm({ lat: end[0], lng: end[1] }, last) > 0.04) {
+    latlngs.push([last.lat, last.lng]);
+  }
   routeGeometryCache.set(key, latlngs);
   return latlngs;
 }
@@ -2127,6 +2162,7 @@ function drawRouteSegment(latlngs, color, tooltipText, kind) {
     dashArray: approx ? "2 8" : null,
     lineJoin: "round",
     lineCap: "round",
+    smoothFactor: 0.15,
   }).addTo(routesLayer);
   poly.bindTooltip(tooltipText, { sticky: true });
 }
