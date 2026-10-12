@@ -2084,26 +2084,41 @@ function geometryCacheKey(profile, pts) {
   return profile + "|" + pts.map((p) => p.lat.toFixed(5) + "," + p.lng.toFixed(5)).join(";");
 }
 
+async function requestStreetGeometry(profile, pts, signal) {
+  const ask = async (radius) => {
+    const coordStr = pts.map((p) => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(";");
+    const radiuses = pts.map(() => String(radius)).join(";");
+    const url = `${OSRM_PROFILE_URL[profile]}/${coordStr}?overview=full&geometries=geojson&steps=false&radiuses=${radiuses}`;
+    const res = await fetch(url, { signal });
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    const coords = data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
+    if (!coords || coords.length < 2) throw new Error(data.code || "empty");
+    return coords.map(([lng, lat]) => [lat, lng]);
+  };
+  try {
+    return await ask(profile === "foot" ? 180 : 100);
+  } catch (err) {
+    if (err && err.name === "AbortError") throw err;
+    if (profile !== "foot") throw err;
+    return ask(400);
+  }
+}
+
 async function fetchOsrmGeometry(profile, pts, signal) {
   const key = geometryCacheKey(profile, pts);
   if (routeGeometryCache.has(key)) return routeGeometryCache.get(key);
-  const coordStr = pts.map((p) => `${p.lng.toFixed(5)},${p.lat.toFixed(5)}`).join(";");
-  const radiuses = pts.map(() => (profile === "foot" ? "180" : "100")).join(";");
-  const url = `${OSRM_PROFILE_URL[profile]}/${coordStr}?overview=full&geometries=geojson&steps=false&radiuses=${radiuses}`;
-  const res = await fetch(url, { signal });
-  if (!res.ok) throw new Error(String(res.status));
-  const data = await res.json();
-  const coords = data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates;
-  if (!coords || coords.length < 2) throw new Error(data.code || "empty");
-  const latlngs = coords.map(([lng, lat]) => [lat, lng]);
-  // Duraklar arasındaki düz mesafeden kat kat uzun bir sapma (otoyol döngüsü,
-  // boğazı köprüden yürüme) bu bacağın yolu değildir; durak sırasına düşülür.
+  const latlngs = await requestStreetGeometry(profile, pts, signal);
+  // Otobüste otoyol döngüsü bu bacağın yolu değildir. Yürüyüşte ise site, ray
+  // ya da sahil engeli yolu uzatır; düz kiriş binaların üzerinden geçtiği için
+  // kaldırım çizgisi korunur. Yalnızca şehri baştan dolaşan sapma elenir.
   let chainKm = 0;
   for (let i = 1; i < pts.length; i++) chainKm += haversineKm(pts[i - 1], pts[i]);
   const alongKm = polylineKm(latlngs);
-  if (chainKm > 0.15 && alongKm > chainKm * 1.9 && alongKm > chainKm + 0.45) {
-    throw new Error("detour");
-  }
+  const extraKm = alongKm - chainKm;
+  const drivingDetour = profile !== "foot" && chainKm > 0.15 && alongKm > chainKm * 1.9 && extraKm > 0.45;
+  const footDetour = profile === "foot" && extraKm > 8 && alongKm > chainKm * 4;
+  if (drivingDetour || footDetour) throw new Error("detour");
   // Durak sitenin içindeyse çizgi yola oturur; son birkaç on metreyi pine bağla.
   const first = pts[0];
   const last = pts[pts.length - 1];
