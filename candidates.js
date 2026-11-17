@@ -18,9 +18,14 @@
 // 1) VERİ MODELİ + DEPOLAMA (localStorage)
 // ---------------------------------------------------------------------------
 
-const CANDIDATE_STORE_KEY = "ist_ulasim_candidates_v1";
+const CANDIDATE_STORE_KEY = "ik_ulasim_candidates_v1";
+let activeCandidateRegion = "local";
 
-/** Telefonu 10 haneli GSM biçimine indirger (0/+90 önekleri atılır) — dedup anahtarı bu. */
+function candidateStorageKey() {
+  return `${CANDIDATE_STORE_KEY}::${activeCandidateRegion}`;
+}
+
+/** Telefonu 10 haneli EGO/GSM biçimine indirger (0/+90 önekleri atılır) — dedup anahtarı bu. */
 function normalizePhone(raw) {
   if (!raw) return "";
   let digits = String(raw).replace(/\D/g, "");
@@ -72,7 +77,7 @@ const CandidateStore = {
   _load() {
     if (this._mem) return this._mem;
     try {
-      this._mem = JSON.parse(localStorage.getItem(CANDIDATE_STORE_KEY) || "[]");
+      this._mem = JSON.parse(localStorage.getItem(candidateStorageKey()) || "[]");
     } catch {
       this._mem = [];
     }
@@ -92,7 +97,7 @@ const CandidateStore = {
   },
   _save() {
     try {
-      localStorage.setItem(CANDIDATE_STORE_KEY, JSON.stringify(this._mem || []));
+      localStorage.setItem(candidateStorageKey(), JSON.stringify(this._mem || []));
     } catch {
       /* localStorage kullanılamıyorsa (ör. gizli sekme) sessizce yoksay */
     }
@@ -127,6 +132,20 @@ const CandidateStore = {
   clear() {
     this._mem = [];
     this._save();
+  },
+  /** Bölge değişince aday havuzu o bölgenin anahtarına geçer. Eski havuz yalnızca Ankara Servis'e taşınır. */
+  bindRegion(slug) {
+    activeCandidateRegion = slug || "local";
+    const key = candidateStorageKey();
+    try {
+      if (!localStorage.getItem(key) && slug === "ankara-servis") {
+        const legacy = localStorage.getItem(CANDIDATE_STORE_KEY);
+        if (legacy) localStorage.setItem(key, legacy);
+      }
+    } catch {
+      /* yoksay */
+    }
+    this._mem = null;
   },
 };
 
@@ -306,14 +325,14 @@ function buildCandidateFromRow(row, mapping, uploadedAt) {
 function matchDistrictOrNeighborhood(text) {
   if (!text) return null;
   const norm = text.toLocaleLowerCase("tr");
-  for (const d of ISTANBUL_DATA.districts) {
+  for (const d of ANKARA_DATA.districts) {
     for (const n of d.neighborhoods || []) {
       if (norm.includes(n.name.toLocaleLowerCase("tr"))) {
         return { districtId: d.id, neighborhoodId: n.id, coords: { lat: n.lat, lng: n.lng } };
       }
     }
   }
-  for (const d of ISTANBUL_DATA.districts) {
+  for (const d of ANKARA_DATA.districts) {
     if (norm.includes(d.name.toLocaleLowerCase("tr"))) {
       return { districtId: d.id, neighborhoodId: null, coords: { lat: d.lat, lng: d.lng } };
     }
@@ -468,7 +487,7 @@ async function scoreCandidateForProject(candidate, project) {
 /** projectId sabit taraf olduğu için getTransitEstimate fixedSide="dest" ile çağrılır (Dijkstra önbelleği isabet eder, bkz. app.js). */
 /** onProgress(done, total), her aday puanlaması bitince çağrılır (isteğe bağlı) — uzun sürebilen ilk geocode turunda ilerlemeyi göstermek için. */
 async function rankCandidatesForProject(projectId, onProgress) {
-  const project = ISTANBUL_DATA.projects.find((p) => p.id === projectId);
+  const project = ANKARA_DATA.projects.find((p) => p.id === projectId);
   if (!project) return [];
   const candidates = CandidateStore.all();
   let done = 0;
@@ -610,7 +629,7 @@ async function renderCandidateFsResults(projectId) {
   selectedCandidateId = null;
   activeAiFilter = null;
   candidateFsAiFilterStatus.innerHTML = "";
-  const project = ISTANBUL_DATA.projects.find((p) => p.id === projectId);
+  const project = ANKARA_DATA.projects.find((p) => p.id === projectId);
   if (!project) {
     candidateFsList.innerHTML = "";
     candidateFsCount.textContent = "";
@@ -695,7 +714,7 @@ candidateFsSearch.addEventListener("input", renderCandidateFsList);
 candidateFsYearFilter.addEventListener("change", renderCandidateFsList);
 
 // ---------------------------------------------------------------------------
-// AI DOĞAL DİL FİLTRE — İK, arama kutusuna "Kadıköy'e yakın, temizlik
+// AI DOĞAL DİL FİLTRE — İK, arama kutusuna "Ostim'e yakın, temizlik
 // deneyimli, 30 yaş altı kadın adaylar" gibi serbest metin yazıp "✨ AI
 // Filtre"ye basınca; AI bunu küçük bir yapılandırılmış filtreye çevirir,
 // filtre mevcut (zaten hesaplanmış) sonuçlar üzerinde İSTEMCİ TARAFINDA
@@ -750,7 +769,7 @@ function renderAiFilterStatus(originalText) {
   }
   candidateFsAiFilterStatus.innerHTML = `
     <span class="inline-flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2.5 py-1">
-      🔎 "${escapeHtml(originalText)}"
+      🔎 "${originalText}"
       <button type="button" id="candidateFsAiFilterClear" class="font-bold hover:text-indigo-900 leading-none">&times;</button>
     </span>`;
   document.getElementById("candidateFsAiFilterClear").addEventListener("click", () => {
@@ -787,8 +806,8 @@ function buildCandidateFsRow(r) {
   row.innerHTML = `
     <div class="flex items-center justify-between gap-2">
       <div class="min-w-0">
-        <div class="text-sm font-semibold text-slate-800 truncate">${escapeHtml(r.candidate.fullName || "İsimsiz aday")}</div>
-        <div class="text-xs text-slate-500">${escapeHtml(r.candidate.phoneRaw || "-")}${year ? ` · ${escapeHtml(String(year))}` : ""}</div>
+        <div class="text-sm font-semibold text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
+        <div class="text-xs text-slate-500">${r.candidate.phoneRaw || "-"}${year ? ` · ${year}` : ""}</div>
       </div>
       ${
         r.eliminated
@@ -820,7 +839,7 @@ function buildCandidateDetailHtml(r) {
   const headerHtml = `
     <div class="flex items-start justify-between gap-3 mb-4">
       <div>
-        <div class="text-lg font-bold text-slate-800">${escapeHtml(c.fullName || "İsimsiz aday")}</div>
+        <div class="text-lg font-bold text-slate-800">${c.fullName || "İsimsiz aday"}</div>
         ${isStale ? `<div class="text-xs text-amber-600 font-semibold mt-0.5">⚠️ ${staleDays} gündür güncellenmedi — İK, adayla tekrar teyit etmeli</div>` : ""}
       </div>
       ${
@@ -877,14 +896,12 @@ function buildCandidateDetailHtml(r) {
     ["Başvuru Tarihi", c.appliedAt ? new Date(c.appliedAt).toLocaleDateString("tr-TR") : "-"],
     ["Sisteme Yüklenme", c.uploadedAt ? new Date(c.uploadedAt).toLocaleDateString("tr-TR") : "-"],
   ];
-  // Excel'den gelen serbest metin alanları (telefon/adres/deneyim/sertifika/
-  // kaynak) — label'lar sabit metin, değerler escapeHtml'den geçirilir.
   const infoHtml = `<div class="border-t border-slate-100 pt-3">
     ${infoRows
       .map(
         ([label, value]) =>
           `<div class="flex justify-between gap-3 py-1.5 border-b border-slate-100 text-sm">
-            <span class="text-slate-500">${label}</span><span class="font-medium text-slate-800 text-right">${escapeHtml(value)}</span>
+            <span class="text-slate-500">${label}</span><span class="font-medium text-slate-800 text-right">${value}</span>
           </div>`
       )
       .join("")}
@@ -1053,7 +1070,7 @@ function renderCandidateMappingUI(headers) {
   candidateMappingRows.innerHTML = CANDIDATE_FIELDS.map((f) => {
     const guessedIdx = guessColumnForField(f.key, headers);
     const options = [`<option value="-1">— Kullanma —</option>`].concat(
-      headers.map((h, i) => `<option value="${i}" ${i === guessedIdx ? "selected" : ""}>${escapeHtml(h || "(sütun " + (i + 1) + ")")}</option>`)
+      headers.map((h, i) => `<option value="${i}" ${i === guessedIdx ? "selected" : ""}>${h || "(sütun " + (i + 1) + ")"}</option>`)
     );
     return `
       <div class="flex items-center gap-2">
@@ -1143,16 +1160,14 @@ candidateImportBtn.addEventListener("click", () => {
 // telefonla farklı bilgisayarlarda içe aktarılan bir aday üzerindeki yorumlar
 // herkese görünür (aynı ID'ye düşerler).
 //
-// İstanbul'da yorumlar da projelerle AYNI Apps Script'i (SHEET_API_URL, bkz.
-// Code.gs) kullanır — "Comments" sekmesi aynı Sheet'te. Kontrat:
+// Bu ayrı, kendi bağımsız Google Sheet'ine yazan bir Apps Script Web App'i
+// kullanır — projelerin kaydedildiği SHEET_API_URL'den TAMAMEN AYRI. Kontrat:
 //   - POST {action:"addComment", comment:{candidateId, candidateName, author, text, createdAt}}
 //     -> {ok:true} döner, "Comments" sayfasına (yoksa oluşturularak) satır ekler.
-//   - GET -> {ok, projects, comments}; comments TÜM adayların yorumlarını içerir,
-//     bu yüzden istemci tarafında candidateId'ye göre süzülür.
-// SHEET_API_URL boşsa (Sheet henüz kurulmadıysa) yorum listesi boş döner ve
-// yorum eklenemez.
-const CANDIDATE_COMMENTS_API_URL = SHEET_API_URL;
-const COMMENT_AUTHOR_KEY = "ist_ulasim_comment_author_v1";
+//   - GET ?action=getComments&candidateId=... -> o candidateId'ye ait yorumları
+//     [{candidateId, candidateName, author, text, createdAt}, ...] olarak döner.
+const CANDIDATE_COMMENTS_API_URL = "https://script.google.com/macros/s/AKfycbzFNeaTMBU0NBJCa9iWiKvexj5f3dEakhwhmCAR8oJwmxWHqQB_ej8-bwqm-maBYI8/exec";
+const COMMENT_AUTHOR_KEY = "ik_ulasim_comment_author_v1";
 
 function getSavedCommentAuthor() {
   try {
@@ -1171,15 +1186,13 @@ function saveCommentAuthor(name) {
 
 async function fetchCommentsForCandidate(candidateId) {
   if (!CANDIDATE_COMMENTS_API_URL) return [];
-  const res = await fetch(CANDIDATE_COMMENTS_API_URL);
+  const res = await fetch(`${CANDIDATE_COMMENTS_API_URL}?action=getComments&candidateId=${encodeURIComponent(candidateId)}`);
   if (!res.ok) throw new Error("Yorumlar alınamadı");
   const data = await res.json();
-  const all = Array.isArray(data) ? data : data.comments || [];
-  return all.filter((c) => c.candidateId === candidateId);
+  return Array.isArray(data) ? data : data.comments || [];
 }
 
 async function postCandidateComment(comment) {
-  if (!CANDIDATE_COMMENTS_API_URL) throw new Error("Sheet henüz kurulmadı (SHEET_API_URL boş) — yorumlar kaydedilemez");
   const res = await fetch(CANDIDATE_COMMENTS_API_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -1206,10 +1219,10 @@ function renderCommentsList(container, comments) {
       (c) => `
       <div class="border-b border-slate-100 py-2">
         <div class="flex items-baseline justify-between gap-2">
-          <span class="text-xs font-semibold text-slate-700">${escapeHtml(c.author || "İsimsiz")}</span>
+          <span class="text-xs font-semibold text-slate-700">${c.author || "İsimsiz"}</span>
           <span class="text-[10px] text-slate-400 whitespace-nowrap">${formatCommentDate(c.createdAt)}</span>
         </div>
-        <div class="text-sm text-slate-600 mt-0.5">${escapeHtml(c.text)}</div>
+        <div class="text-sm text-slate-600 mt-0.5">${c.text}</div>
       </div>`
     )
     .join("");
@@ -1229,7 +1242,7 @@ function renderCommentsSection(candidateId, candidateName) {
   const savedAuthor = getSavedCommentAuthor();
   const formHtml = `
     <div class="mt-3 pt-3 border-t border-slate-100">
-      <input id="commentAuthorInput" type="text" placeholder="Adınız" value="${escapeHtml(savedAuthor)}" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm mb-1.5" />
+      <input id="commentAuthorInput" type="text" placeholder="Adınız" value="${savedAuthor}" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm mb-1.5" />
       <textarea id="commentTextInput" rows="2" placeholder="Bu aday hakkında bir not ekle…" class="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-sm resize-none"></textarea>
       <div class="flex items-center justify-between mt-1.5">
         <span id="commentStatus" class="text-[11px] text-slate-400"></span>
@@ -1306,7 +1319,7 @@ candidateAiBtn.addEventListener("click", () => {
     alert("Önce bir proje seçip adayların sıralanmasını bekle.");
     return;
   }
-  const project = ISTANBUL_DATA.projects.find((p) => p.id === lastCandidateFsProjectId);
+  const project = ANKARA_DATA.projects.find((p) => p.id === lastCandidateFsProjectId);
   candidateAiProjectName.textContent = project ? project.name : "";
   candidateAiModal.classList.remove("hidden");
   candidateAiInput.focus();
@@ -1354,14 +1367,15 @@ async function sendAiQuestion() {
   const thinkingBubble = appendAiMessage("ai", "Düşünüyor…");
 
   try {
-    const project = ISTANBUL_DATA.projects.find((p) => p.id === lastCandidateFsProjectId);
-    const answer = await callAI(
-      "Sen bir İK asistanısın. SADECE verilen aday verilerine dayanarak Türkçe, kısa ve net cevap ver. Veride olmayan bir bilgiyi uydurma; bilmiyorsan bilmediğini söyle.",
-      `Proje: ${project ? project.name : ""}\n\nAday verileri (JSON):\n${JSON.stringify(buildAiContext())}\n\nSoru: ${question}`
-    );
-    thinkingBubble.textContent = answer || "Cevap alınamadı.";
-  } catch (err) {
-    thinkingBubble.textContent = `Hata: ${err && err.message ? err.message : "bağlantı hatası — tekrar dene."}`;
+    const res = await fetch(CANDIDATE_COMMENTS_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "askAI", question, context: buildAiContext() }),
+    });
+    const data = await res.json();
+    thinkingBubble.textContent = data.ok ? data.answer : `Hata: ${data.error || "bilinmeyen bir sorun oluştu"}`;
+  } catch {
+    thinkingBubble.textContent = "Bağlantı hatası — tekrar dene.";
   } finally {
     candidateAiSend.disabled = false;
     candidateAiLog.scrollTop = candidateAiLog.scrollHeight;
@@ -1444,8 +1458,8 @@ function renderBatchMatchProjectList() {
           <div class="flex items-center gap-2 py-1.5">
             <input type="checkbox" class="batch-project-checkbox" data-project-id="${p.id}" />
             <div class="flex-1 min-w-0">
-              <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(p.name)}</div>
-              <div class="text-[10px] text-slate-400 truncate">${escapeHtml(p.address)}</div>
+              <div class="text-xs font-medium text-slate-700 truncate">${p.name}</div>
+              <div class="text-[10px] text-slate-400 truncate">${p.address}</div>
             </div>
             <input type="number" min="0" placeholder="Sınırsız" data-project-id="${p.id}"
               class="batch-project-capacity w-16 border border-slate-200 rounded-md px-1.5 py-1 text-xs"
@@ -1479,7 +1493,7 @@ batchMatchRunBtn.addEventListener("click", async () => {
   const patches = [];
   projectIds.forEach((id) => {
     const input = batchMatchProjectList.querySelector(`.batch-project-capacity[data-project-id="${id}"]`);
-    const project = ISTANBUL_DATA.projects.find((p) => p.id === id);
+    const project = ANKARA_DATA.projects.find((p) => p.id === id);
     const rawValue = input.value.trim();
     const newCapacity = rawValue === "" ? "" : Number(rawValue);
     const currentCapacity = project.capacity != null ? project.capacity : "";
@@ -1493,7 +1507,7 @@ batchMatchRunBtn.addEventListener("click", async () => {
       const { updatedIds } = await postBatchUpdate(patches);
       patches.forEach(({ id, patch }) => {
         if (updatedIds.has(id)) {
-          const project = ISTANBUL_DATA.projects.find((p) => p.id === id);
+          const project = ANKARA_DATA.projects.find((p) => p.id === id);
           if (project) project.capacity = patch.capacity === "" ? null : patch.capacity;
         }
       });
@@ -1529,7 +1543,7 @@ batchMatchRunBtn.addEventListener("click", async () => {
  * birkaç proje için anında çalışır.
  */
 async function runBatchMatch(projectIds, onProgress) {
-  const projects = projectIds.map((id) => ISTANBUL_DATA.projects.find((p) => p.id === id)).filter(Boolean);
+  const projects = projectIds.map((id) => ANKARA_DATA.projects.find((p) => p.id === id)).filter(Boolean);
   const candidates = CandidateStore.all();
 
   const allTriples = [];
@@ -1600,8 +1614,8 @@ function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
               (r) => `
               <div class="batch-candidate-row flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0 cursor-pointer hover:bg-slate-50 rounded-md px-1 -mx-1" data-candidate-id="${r.candidate.id}">
                 <div class="min-w-0">
-                  <div class="text-sm font-medium text-slate-800 truncate">${escapeHtml(r.candidate.fullName || "İsimsiz aday")}</div>
-                  <div class="text-xs text-slate-400">${escapeHtml(r.candidate.phoneRaw || "-")}</div>
+                  <div class="text-sm font-medium text-slate-800 truncate">${r.candidate.fullName || "İsimsiz aday"}</div>
+                  <div class="text-xs text-slate-400">${r.candidate.phoneRaw || "-"}</div>
                 </div>
                 <span class="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${r.total} p</span>
               </div>`
@@ -1612,7 +1626,7 @@ function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
       return `
         <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
           <div class="flex items-baseline justify-between gap-2 mb-2">
-            <div class="text-sm font-bold text-slate-800">${escapeHtml(p.name)}</div>
+            <div class="text-sm font-bold text-slate-800">${p.name}</div>
             <div class="text-xs text-slate-400 whitespace-nowrap">${list.length} / ${capacityLabel}</div>
           </div>
           ${rowsHtml}
@@ -1626,7 +1640,7 @@ function renderBatchMatchResults(assignmentsByProject, unassigned, projects) {
         <div class="text-sm font-bold text-amber-800 mb-2">Yerleştirilemeyen Adaylar (${unassigned.length})</div>
         <p class="text-xs text-amber-700 mb-2 leading-snug">Bu adaylar seçili projelerden en az birine uygundu ama kontenjan dolduğu için başka bir adaya yer açıldı.</p>
         <div class="flex flex-wrap gap-1.5">
-          ${unassigned.map((c) => `<span class="text-xs bg-white border border-amber-200 rounded-full px-2 py-1 text-amber-700">${escapeHtml(c.fullName || "İsimsiz aday")}</span>`).join("")}
+          ${unassigned.map((c) => `<span class="text-xs bg-white border border-amber-200 rounded-full px-2 py-1 text-amber-700">${c.fullName || "İsimsiz aday"}</span>`).join("")}
         </div>
       </div>`
     : "";

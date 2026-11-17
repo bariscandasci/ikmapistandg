@@ -1,29 +1,21 @@
 /**
- * Tepe Güvenlik 4. Direktörlük — paylaşımlı proje veritabanı + aday yorumları + AI.
- * Ankara ve İstanbul Anadolu sayfalarından AYRI bir Google Sheet'e yazar.
- *
- * Kurulum:
- * 1. Yeni bir Google Sheet aç (ör. "Tepe Güvenlik 4. Direktörlük").
- * 2. Uzantılar > Apps Script, bu dosyanın tamamını yapıştır, kaydet.
- * 3. Dağıt > Yeni dağıtım > Web uygulaması.
- *    Yürütme: Ben, Erişim: Herkes. Dağıt.
- * 4. Çıkan /exec adresini app.js içindeki SHEET_API_URL'e yapıştır.
- * İlk sayfa açılışı boş "Projeler" sekmesine 10 güvenlik projesini yazar
- * (urgent=false, active=true). Sonraki aç/kapa ve acil kayıtları aynı satırlara
- * yazılır. AI için Script Özellikleri'ne GEMINI_API_KEY eklenebilir.
- * Kod güncellemesinde Dağıtımları yönet > mevcut dağıtımın yeni sürümünü yayınla
- * (adres değişmez).
+ * İK Ulaşım & Proje Eşleştirme Modülü — paylaşımlı proje veritabanı + aday yorumları.
+ * Bu dosyayı, "Projeler" (ve "Comments") sayfalarını içeren Google Sheet'te
+ * Uzantılar > Apps Script menüsünden açılan editöre YAPIŞTIR,
+ * sonra "Dağıt > Dağıtımları yönet" ile mevcut dağıtımın YENİ SÜRÜMÜNÜ yayınla
+ * (URL değişmez, sadece kod güncellenir).
  */
 
 const SHEET_NAME = "Projeler";
 const FIELDS = [
   "id", "name", "sector", "address", "lat", "lng", "accessStopId",
   "shift", "salary", "meal", "transport", "referral", "gender",
-  "urgent", "active", "capacity", "position", "ageMin", "ageMax",
+  "urgent", "active", "capacity", "position",
 ];
 
 /**
- * "capacity", "position", "ageMin" ve "ageMax" sonradan eklenen alanlar — canlı Sheet'in başlık
+ * "capacity" (kontenjan) ve "position" (Pozisyon Filtresi — Şeflik/Temizlik
+ * Görevlisi/Servis) sonradan eklenen alanlar — canlı Sheet'in başlık
  * satırında henüz yoksa (ör. bu kod ilk kez deploy edildiğinde) burada
  * otomatik olarak sütun başlıkları eklenir. Böylece kullanıcı Sheet'i elle
  * düzenlemek zorunda kalmaz. Mevcut satırlardaki hücreler boş kalır — bu
@@ -34,7 +26,7 @@ function ensureLaterAddedColumns_() {
   const sheet = getSheet_();
   let lastCol = sheet.getLastColumn();
   const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
-  ["capacity", "position", "ageMin", "ageMax"].forEach((col) => {
+  ["capacity", "position"].forEach((col) => {
     if (!header.includes(col)) {
       lastCol += 1;
       sheet.getRange(1, lastCol).setValue(col);
@@ -48,15 +40,8 @@ function ensureLaterAddedColumns_() {
 const COMMENTS_SHEET_NAME = "Comments";
 const COMMENT_FIELDS = ["candidateId", "candidateName", "author", "text", "createdAt"];
 
-/** "Projeler" sekmesi yoksa (ör. ilk kurulum) başlık satırıyla birlikte oluşturur. */
 function getSheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAME);
-    sheet.appendRow(FIELDS);
-  }
-  return sheet;
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
 }
 
 /** "Comments" sekmesi yoksa (ör. ilk kurulum) başlık satırıyla birlikte oluşturur. */
@@ -100,8 +85,8 @@ function readAllRows_() {
           v = v === true || v === "TRUE" || v === "true";
         } else if (key === "lat" || key === "lng") {
           v = Number(v);
-        } else if (key === "capacity" || key === "ageMin" || key === "ageMax") {
-          // Boş hücre = tanımsız (kontenjan için sınırsız); dolu hücre sayıya çevrilir.
+        } else if (key === "capacity") {
+          // Boş hücre = sınırsız kontenjan (null); dolu hücre sayıya çevrilir.
           v = v === "" || v == null ? null : Number(v);
         } else {
           v = v == null ? "" : String(v);
@@ -121,43 +106,12 @@ function findRowIndexById_(id) {
   return -1;
 }
 
-/**
- * "Projeler" sekmesi boşsa Tepe Güvenlik 4. Direktörlük'teki 10 projeyi yazar.
- * Hepsi açık (active=true) ve acil değil (urgent=false) başlar. Sekmede veri
- * varsa hiçbir satıra dokunmaz — aç/kapa ve acil işaretleri korunur.
- * doGet ilk okumada bunu kendisi çağırır; editörden de çalıştırılabilir.
- */
-function seedIfEmpty() {
-  const sheet = getSheet_();
-  if (sheet.getLastRow() > 1) return;
-  const rows = [
-    ["proj_kentplus_3352", "Kentplus 3352 Ada Sitesi", "Güvenlik", "Barbaros Mahallesi, Ataşehir", 40.997671, 29.104585, "stop_yenisahra", "12 saat · 2 gündüz 2 gece 2 izin", "47.000₺ · net 51.000₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Ferdi Hakan / İK: Feray Çorlu — Elit site; özel güvenlik kimlik kartı zorunlu", "Erkek", false, true, "", "Özel Güvenlik", 22, 43],
-    ["proj_pendorya_avm", "Pendorya AVM", "Güvenlik", "Çamçeşme, Pendik", 40.866101, 29.275137, "stop_tersane", "12 saat · 2 gündüz 2 gece 2 izin", "44.500₺ · net 47.500₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Selim Öztürk / İK: Feray Çorlu — Mesai imkânı mevcut", "Erkek", false, true, "", "Özel Güvenlik", 22, 44],
-    ["proj_tepe_nautilus", "Tepe Nautilus AVM", "Güvenlik", "Acıbadem, Fatih Sk. No:1, Kadıköy", 40.999617, 29.031495, "stop_ayrilik_cesmesi", "07:00-15:00 / 15:00-23:00 / 23:00-07:00 · 6 çalış 1 izin", "41.000₺ · net 44.628₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın — Vergi kesintisi yok", "Kadın/Erkek", false, true, "", "Özel Güvenlik", 22, 45],
-    ["proj_anadolu_grubu", "Anadolu Grubu", "Güvenlik", "Buyaka, Balkan Cd. No:58, Ümraniye", 41.026465, 29.127646, "stop_ihlamurkuyu", "8 saat · 6 çalış 1 izin", "54.000₺ · net 62.618₺", "4.990₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Nazım Güler / İK: Feray Çorlu", "Erkek", false, true, "", "Özel Güvenlik", 22, 32],
-    ["proj_acarer_metal", "Acarer Metal (BOSB)", "Güvenlik", "Aydınlı, 1 Nolu Cd. No:14, BOSB, Tuzla", 40.877745, 29.397198, "stop_sabiha_gokcen_havalimani", "12 saat · 3 çalış 2 off", "41.750₺ · net 47.550₺", "Projede", "5.250₺", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın — Metal fabrikası", "Erkek", false, true, "", "Özel Güvenlik", 22, 46],
-    ["proj_sukru_saracoglu", "Şükrü Saracoğlu", "Güvenlik", "Zühtüpaşa, Recep Peker Cd. No:3, Kadıköy", 40.987581, 29.036977, "stop_sogutlucesme", "12 saat · 2 gündüz 2 gece 2 izin", "39.600₺ · net 53.628₺", "3.628₺", "10.400₺", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın — Stadyum projesi", "Erkek", false, true, "", "Özel Güvenlik", 22, 44],
-    ["proj_kuhne_nagel", "Kühne Nagel Depo", "Güvenlik", "Orta, Öztaş Sk. No:12, Logipark, Tuzla", 40.891272, 29.396216, "stop_sabiha_gokcen_havalimani", "12 saat · 4 çalış 3 off", "42.300₺", "Projede", "Servis", "Projeye yönlendirilecek — Operasyon: Berkok Çelikcan / İK: Ezgi Nur Taşkın", "Erkek", false, true, "", "Özel Güvenlik", 22, 47],
-    ["proj_sutas", "Sütaş", "Güvenlik", "Dudullu OSB, Ümraniye", 40.996189, 29.177048, "stop_modoko", "12 saat · 2 gündüz 2 gece 2 izin", "32.720₺ · net 43.632₺", "Projede", "Servis", "Operasyon görüşmesi, ardından projeye yönlendirilecek — Operasyon: Murat Doğan / İK: S. Nur Güleç — Tecilli ve emekli alımı yok", "Erkek", false, true, "", "Özel Güvenlik", 22, 40],
-    ["proj_medipol_kavacik", "Medipol Üniversitesi Kampüsü", "Güvenlik", "Kavacık, Beykoz", 41.091038, 29.091431, "stop_carsi_2", "12 saat · 2 gündüz 2 gece 2 izin", "41.563₺", "Projede", "3.628₺", "Projeye yönlendirilecek — Operasyon: Murat Doğan / İK: S. Nur Güleç — Tecilli alımı yok; emekli alımı var", "Erkek", false, true, "", "Özel Güvenlik", 22, 45],
-    ["proj_bomontiada", "Bomontiada", "Güvenlik", "Bomonti, Şişli", 41.058118, 28.980848, "stop_osmanbey", "07:00-15:00 / 15:00-23:00 / 23:00-07:00 · 6 çalış 1 izin", "38.432₺ · net 41.730₺", "7.800₺", "3.628₺", "Projeye yönlendirilecek — Operasyon: Ersan Artan / İK: S. Nur Güleç — X-ray bilgisi gerekli", "Kadın", false, true, "", "Özel Güvenlik", 22, 39],
-  ];
-  sheet.getRange(2, 1, rows.length, FIELDS.length).setValues(rows);
-}
-
 function doGet(e) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    ensureLaterAddedColumns_();
-    seedIfEmpty();
-    const projects = readAllRows_();
-    const comments = readAllComments_();
-    return ContentService.createTextOutput(JSON.stringify({ ok: true, projects, comments }))
-      .setMimeType(ContentService.MimeType.JSON);
-  } finally {
-    lock.releaseLock();
-  }
+  ensureLaterAddedColumns_();
+  const projects = readAllRows_();
+  const comments = readAllComments_();
+  return ContentService.createTextOutput(JSON.stringify({ ok: true, projects, comments }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function doPost(e) {
